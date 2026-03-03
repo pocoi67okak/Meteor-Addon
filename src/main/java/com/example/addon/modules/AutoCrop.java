@@ -1,6 +1,5 @@
 package com.example.addon.modules;
 
-import com.example.addon.AutocropAddon;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
@@ -8,9 +7,8 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
-import meteordevelopment.meteorclient.utils.world.BlockIterator;
-import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
@@ -18,8 +16,14 @@ import net.minecraft.block.NetherWartBlock;
 import net.minecraft.block.CocoaBlock;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+
+import java.util.ArrayList;
+import java.util.List;
 
 public class AutoCrop extends Module {
     public enum RotationMode {
@@ -32,47 +36,49 @@ public class AutoCrop extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgCrops = settings.createGroup("Crops");
 
-    // General Settings
-    private final Setting<Double> radius = sgGeneral.add(new DoubleSetting.Builder()
+    // --- General ---
+
+    private final Setting<Integer> radius = sgGeneral.add(new IntSetting.Builder()
         .name("radius")
         .description("The radius to scan for crops.")
-        .defaultValue(4.0)
-        .min(1.0)
-        .sliderMax(10.0)
+        .defaultValue(4)
+        .range(1, 10)
+        .sliderRange(1, 10)
         .build()
     );
 
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
         .name("delay")
-        .description("Delay in ticks between actions (1 = lightning fast, 20 = slow).")
+        .description("Delay in ticks between actions (1 = fast, 20 = slow).")
         .defaultValue(5)
-        .min(1)
-        .sliderMax(20)
+        .range(1, 20)
+        .sliderRange(1, 20)
         .build()
     );
 
     private final Setting<Boolean> replant = sgGeneral.add(new BoolSetting.Builder()
         .name("replant")
-        .description("Whether to automatically replant seeds after harvesting.")
+        .description("Replant seeds after harvesting.")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<RotationMode> rotationMode = sgGeneral.add(new EnumSetting.Builder<RotationMode>()
         .name("rotations")
-        .description("When to rotate your head.")
+        .description("When to rotate your head towards the crop.")
         .defaultValue(RotationMode.Always)
         .build()
     );
 
     private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
         .name("debug")
-        .description("Send local chat messages explaining why actions fail.")
+        .description("Send local debug messages to chat.")
         .defaultValue(false)
         .build()
     );
 
-    // Crops Settings
+    // --- Crops ---
+
     private final Setting<Boolean> harvestWheat = sgCrops.add(new BoolSetting.Builder()
         .name("wheat")
         .description("Harvest wheat.")
@@ -116,7 +122,6 @@ public class AutoCrop extends Module {
     );
 
     private int timer = 0;
-    private boolean actionTakenThisTick = false;
 
     public AutoCrop() {
         super(Categories.Player, "auto-crop", "Automatically harvests and replants fully grown crops.");
@@ -129,25 +134,94 @@ public class AutoCrop extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null || mc.world == null || mc.interactionManager == null) return;
 
         if (timer > 0) {
             timer--;
             return;
         }
 
-        actionTakenThisTick = false;
+        // Scan for mature crops in range
+        BlockPos playerPos = mc.player.getBlockPos();
+        int r = radius.get();
+        BlockPos target = null;
+        BlockState targetState = null;
 
-        BlockIterator.register((int) Math.ceil(radius.get()), (int) Math.ceil(radius.get()), (blockPos, blockState) -> {
-            if (actionTakenThisTick) return;
+        for (int x = -r; x <= r; x++) {
+            for (int y = -r; y <= r; y++) {
+                for (int z = -r; z <= r; z++) {
+                    BlockPos pos = playerPos.add(x, y, z);
+                    BlockState state = mc.world.getBlockState(pos);
 
-            if (isFullyGrownCrop(blockState) && isCropEnabled(blockState)) {
-                harvestAndReplant(blockPos, blockState);
-                if (actionTakenThisTick) {
-                    timer = delay.get();
+                    if (isFullyGrownCrop(state) && isCropEnabled(state)) {
+                        target = pos;
+                        targetState = state;
+                        break;
+                    }
                 }
+                if (target != null) break;
             }
-        });
+            if (target != null) break;
+        }
+
+        if (target == null) return;
+
+        // Harvest
+        Item seedItem = getSeedItem(targetState);
+        BlockPos finalTarget = target;
+
+        boolean shouldRotateHarvest = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Harvest;
+
+        if (shouldRotateHarvest) {
+            Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
+                breakCrop(finalTarget);
+            });
+        } else {
+            breakCrop(finalTarget);
+        }
+
+        if (debug.get()) info("Harvested crop at " + finalTarget.toShortString());
+
+        // Replant
+        if (replant.get() && seedItem != null) {
+            FindItemResult seedResult = InvUtils.find(seedItem);
+            if (seedResult.found()) {
+                // Swap to seeds if needed
+                if (!seedResult.isMainHand() && !seedResult.isOffhand()) {
+                    InvUtils.swap(seedResult.slot(), false);
+                }
+
+                boolean shouldRotateReplant = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Replant;
+
+                if (shouldRotateReplant) {
+                    Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
+                        placeSeed(finalTarget);
+                    });
+                } else {
+                    placeSeed(finalTarget);
+                }
+
+                if (debug.get()) info("Replanted at " + finalTarget.toShortString());
+            } else {
+                if (debug.get()) info("No seeds found for replanting at " + finalTarget.toShortString());
+            }
+        }
+
+        timer = delay.get();
+    }
+
+    private void breakCrop(BlockPos pos) {
+        mc.interactionManager.attackBlock(pos, Direction.UP);
+    }
+
+    private void placeSeed(BlockPos pos) {
+        BlockHitResult hitResult = new BlockHitResult(
+            Vec3d.ofCenter(pos),
+            Direction.UP,
+            pos.down(),
+            false
+        );
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
     }
 
     private boolean isCropEnabled(BlockState state) {
@@ -171,55 +245,6 @@ public class AutoCrop extends Module {
             return state.get(CocoaBlock.AGE) >= 2;
         }
         return false;
-    }
-
-    private void harvestAndReplant(BlockPos pos, BlockState state) {
-        Item seedItem = getSeedItem(state);
-        if (seedItem == null) return;
-
-        // Break logic
-        Runnable breakAction = () -> {
-            boolean broken = BlockUtils.breakBlock(pos, true);
-            if (broken) {
-                if (debug.get()) info("Harvested crop at " + pos.toShortString());
-                actionTakenThisTick = true;
-            } else {
-                if (debug.get()) info("Failed to break crop at " + pos.toShortString());
-            }
-        };
-
-        if (rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Harvest) {
-            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), breakAction);
-        } else {
-            breakAction.run();
-        }
-
-        if (!actionTakenThisTick) return; // If we didn't break it, don't replant
-
-        // Replant logic
-        if (replant.get()) {
-            FindItemResult seedResult = InvUtils.find(seedItem);
-            if (seedResult.found()) {
-                Runnable placeAction = () -> {
-                    // Slight delay is handled by the overall module timer resetting, 
-                    // but block place and break in same tick without delay is risky for anti cheat.
-                    // Assuming meteor's BlockUtils handles instant tick placement somewhat gracefully.
-                    boolean placed = BlockUtils.place(pos, seedResult, rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Replant, 50, true, true);
-                    if (debug.get()) {
-                        if (placed) info("Replanted seed at " + pos.toShortString());
-                        else info("Failed to replant seed at " + pos.toShortString());
-                    }
-                };
-
-                if (rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Replant) {
-                    Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), placeAction);
-                } else {
-                    placeAction.run();
-                }
-            } else {
-                if (debug.get()) info("Could not replant at " + pos.toShortString() + ": No " + seedItem.getTranslationKey() + " found in inventory.");
-            }
-        }
     }
 
     private Item getSeedItem(BlockState state) {
