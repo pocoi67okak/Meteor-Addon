@@ -9,7 +9,6 @@ import org.slf4j.Logger;
 
 public class AutocropAddon extends MeteorAddon {
     public static final Logger LOG = LogUtils.getLogger();
-    public static final Category CATEGORY = new Category("AutoCrop");
 
     @Override
     public void onInitialize() {
@@ -21,7 +20,7 @@ public class AutocropAddon extends MeteorAddon {
 
     @Override
     public void onRegisterCategories() {
-        Modules.registerCategory(CATEGORY);
+        // No custom categories needed
     }
 
     @Override
