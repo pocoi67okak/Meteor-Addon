@@ -8,12 +8,13 @@ import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
+import net.minecraft.block.FarmlandBlock;
 import net.minecraft.block.NetherWartBlock;
 import net.minecraft.block.CocoaBlock;
+import net.minecraft.item.HoeItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
 import net.minecraft.util.Hand;
@@ -21,9 +22,6 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-
-import java.util.ArrayList;
-import java.util.List;
 
 public class AutoCrop extends Module {
     public enum RotationMode {
@@ -58,14 +56,21 @@ public class AutoCrop extends Module {
 
     private final Setting<Boolean> replant = sgGeneral.add(new BoolSetting.Builder()
         .name("replant")
-        .description("Replant seeds after harvesting.")
+        .description("Automatically plant seeds on any empty farmland in range.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> autoHoe = sgGeneral.add(new BoolSetting.Builder()
+        .name("hoe")
+        .description("Automatically till dirt/grass blocks near water into farmland using a hoe.")
+        .defaultValue(false)
         .build()
     );
 
     private final Setting<RotationMode> rotationMode = sgGeneral.add(new EnumSetting.Builder<RotationMode>()
         .name("rotations")
-        .description("When to rotate your head towards the crop.")
+        .description("When to rotate your head towards the target.")
         .defaultValue(RotationMode.Always)
         .build()
     );
@@ -141,12 +146,10 @@ public class AutoCrop extends Module {
             return;
         }
 
-        // Scan for mature crops in range
         BlockPos playerPos = mc.player.getBlockPos();
         int r = radius.get();
-        BlockPos target = null;
-        BlockState targetState = null;
 
+        // Priority 1: Harvest mature crops
         for (int x = -r; x <= r; x++) {
             for (int y = -r; y <= r; y++) {
                 for (int z = -r; z <= r; z++) {
@@ -154,74 +157,167 @@ public class AutoCrop extends Module {
                     BlockState state = mc.world.getBlockState(pos);
 
                     if (isFullyGrownCrop(state) && isCropEnabled(state)) {
-                        target = pos;
-                        targetState = state;
-                        break;
+                        doHarvest(pos, state);
+                        timer = delay.get();
+                        return;
                     }
                 }
-                if (target != null) break;
             }
-            if (target != null) break;
         }
 
-        if (target == null) return;
+        // Priority 2: Auto-hoe dirt/grass near water
+        if (autoHoe.get()) {
+            for (int x = -r; x <= r; x++) {
+                for (int y = -r; y <= r; y++) {
+                    for (int z = -r; z <= r; z++) {
+                        BlockPos pos = playerPos.add(x, y, z);
+                        BlockState state = mc.world.getBlockState(pos);
 
-        // Harvest
-        Item seedItem = getSeedItem(targetState);
-        BlockPos finalTarget = target;
+                        if (canTill(pos, state)) {
+                            doTill(pos);
+                            timer = delay.get();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
 
-        boolean shouldRotateHarvest = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Harvest;
+        // Priority 3: Plant seeds on empty farmland
+        if (replant.get()) {
+            for (int x = -r; x <= r; x++) {
+                for (int y = -r; y <= r; y++) {
+                    for (int z = -r; z <= r; z++) {
+                        BlockPos pos = playerPos.add(x, y, z);
+                        BlockState state = mc.world.getBlockState(pos);
 
-        if (shouldRotateHarvest) {
-            Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
-                breakCrop(finalTarget);
+                        if (isEmptyFarmland(pos, state)) {
+                            doPlant(pos);
+                            timer = delay.get();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------
+    // Actions
+    // -------------------------
+
+    private void doHarvest(BlockPos pos, BlockState state) {
+        boolean shouldRotate = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Harvest;
+
+        if (shouldRotate) {
+            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
+                mc.interactionManager.attackBlock(pos, Direction.UP);
             });
         } else {
-            breakCrop(finalTarget);
+            mc.interactionManager.attackBlock(pos, Direction.UP);
         }
 
-        if (debug.get()) info("Harvested crop at " + finalTarget.toShortString());
+        if (debug.get()) info("Harvested crop at " + pos.toShortString());
+    }
 
-        // Replant
-        if (replant.get() && seedItem != null) {
-            FindItemResult seedResult = InvUtils.find(seedItem);
-            if (seedResult.found()) {
-                // Swap to seeds if needed
-                if (!seedResult.isMainHand() && !seedResult.isOffhand()) {
-                    InvUtils.swap(seedResult.slot(), false);
-                }
-
-                boolean shouldRotateReplant = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Replant;
-
-                if (shouldRotateReplant) {
-                    Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
-                        placeSeed(finalTarget);
-                    });
-                } else {
-                    placeSeed(finalTarget);
-                }
-
-                if (debug.get()) info("Replanted at " + finalTarget.toShortString());
-            } else {
-                if (debug.get()) info("No seeds found for replanting at " + finalTarget.toShortString());
-            }
+    private void doTill(BlockPos pos) {
+        // Find a hoe in inventory
+        FindItemResult hoeResult = InvUtils.find(stack -> stack.getItem() instanceof HoeItem);
+        if (!hoeResult.found()) {
+            if (debug.get()) info("No hoe found in inventory, cannot till at " + pos.toShortString());
+            return;
         }
 
-        timer = delay.get();
-    }
+        // Swap hoe to main hand
+        if (!hoeResult.isMainHand()) {
+            InvUtils.swap(hoeResult.slot(), false);
+        }
 
-    private void breakCrop(BlockPos pos) {
-        mc.interactionManager.attackBlock(pos, Direction.UP);
-    }
+        boolean shouldRotate = rotationMode.get() == RotationMode.Always || rotationMode.get() != RotationMode.None;
 
-    private void placeSeed(BlockPos pos) {
         BlockHitResult hitResult = new BlockHitResult(
             Vec3d.ofCenter(pos),
             Direction.UP,
-            pos.down(),
+            pos,
             false
         );
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+
+        if (shouldRotate) {
+            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
+                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+            });
+        } else {
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+        }
+
+        if (debug.get()) info("Tilled dirt at " + pos.toShortString());
+    }
+
+    private void doPlant(BlockPos pos) {
+        // pos is the farmland block. We need seeds in hand.
+        // Find any seed we have
+        FindItemResult seedResult = findAnySeed();
+        if (!seedResult.found()) {
+            if (debug.get()) info("No seeds found in inventory for planting at " + pos.toShortString());
+            return;
+        }
+
+        if (!seedResult.isMainHand()) {
+            InvUtils.swap(seedResult.slot(), false);
+        }
+
+        boolean shouldRotate = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Replant;
+
+        BlockHitResult hitResult = new BlockHitResult(
+            Vec3d.ofCenter(pos).add(0, 0.5, 0),
+            Direction.UP,
+            pos,
+            false
+        );
+
+        if (shouldRotate) {
+            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
+                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+            });
+        } else {
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+        }
+
+        if (debug.get()) info("Planted seed at " + pos.toShortString());
+    }
+
+    // -------------------------
+    // Checks
+    // -------------------------
+
+    private boolean canTill(BlockPos pos, BlockState state) {
+        // Can till: dirt, grass_block, dirt_path — only if the block above is air
+        if (!state.isOf(Blocks.DIRT) && !state.isOf(Blocks.GRASS_BLOCK) && !state.isOf(Blocks.DIRT_PATH)) {
+            return false;
+        }
+        // Must have air above
+        BlockState above = mc.world.getBlockState(pos.up());
+        if (!above.isAir()) return false;
+        // Check if hoe exists in inventory
+        return InvUtils.find(stack -> stack.getItem() instanceof HoeItem).found();
+    }
+
+    private boolean isEmptyFarmland(BlockPos pos, BlockState state) {
+        // Farmland with air above (no crop planted)
+        if (!state.isOf(Blocks.FARMLAND)) return false;
+        BlockState above = mc.world.getBlockState(pos.up());
+        return above.isAir();
+    }
+
+    private FindItemResult findAnySeed() {
+        return InvUtils.find(stack -> {
+            Item item = stack.getItem();
+            return item == Items.WHEAT_SEEDS ||
+                   item == Items.CARROT ||
+                   item == Items.POTATO ||
+                   item == Items.BEETROOT_SEEDS ||
+                   item == Items.NETHER_WART;
+        });
     }
 
     private boolean isCropEnabled(BlockState state) {
