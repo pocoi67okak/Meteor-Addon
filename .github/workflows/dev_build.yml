@@ -1,5 +1,13 @@
 name: Publish Development Build
-on: push
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+  workflow_dispatch:
 
 jobs:
   build:
