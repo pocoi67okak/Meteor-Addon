@@ -8,6 +8,7 @@ import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
@@ -54,10 +55,24 @@ public class AutoCrop extends Module {
         .build()
     );
 
+    private final Setting<Boolean> harvest = sgGeneral.add(new BoolSetting.Builder()
+        .name("harvest")
+        .description("Automatically harvest fully grown crops in range.")
+        .defaultValue(true)
+        .build()
+    );
+
     private final Setting<Boolean> replant = sgGeneral.add(new BoolSetting.Builder()
         .name("replant")
         .description("Automatically plant seeds on any empty farmland in range.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> autoBreak = sgGeneral.add(new BoolSetting.Builder()
+        .name("break")
+        .description("Automatically break wildflowers, short grass, and tall grass in range.")
+        .defaultValue(false)
         .build()
     );
 
@@ -150,22 +165,42 @@ public class AutoCrop extends Module {
         int r = radius.get();
 
         // Priority 1: Harvest mature crops
-        for (int x = -r; x <= r; x++) {
-            for (int y = -r; y <= r; y++) {
-                for (int z = -r; z <= r; z++) {
-                    BlockPos pos = playerPos.add(x, y, z);
-                    BlockState state = mc.world.getBlockState(pos);
+        if (harvest.get()) {
+            for (int x = -r; x <= r; x++) {
+                for (int y = -r; y <= r; y++) {
+                    for (int z = -r; z <= r; z++) {
+                        BlockPos pos = playerPos.add(x, y, z);
+                        BlockState state = mc.world.getBlockState(pos);
 
-                    if (isFullyGrownCrop(state) && isCropEnabled(state)) {
-                        doHarvest(pos, state);
-                        timer = delay.get();
-                        return;
+                        if (isFullyGrownCrop(state) && isCropEnabled(state)) {
+                            doHarvest(pos, state);
+                            timer = delay.get();
+                            return;
+                        }
                     }
                 }
             }
         }
 
-        // Priority 2: Auto-hoe dirt/grass near water
+        // Priority 2: Break weeds (wildflowers, short grass, tall grass)
+        if (autoBreak.get()) {
+            for (int x = -r; x <= r; x++) {
+                for (int y = -r; y <= r; y++) {
+                    for (int z = -r; z <= r; z++) {
+                        BlockPos pos = playerPos.add(x, y, z);
+                        BlockState state = mc.world.getBlockState(pos);
+
+                        if (isBreakableWeed(state)) {
+                            doBreakBlock(pos);
+                            timer = delay.get();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Priority 3: Auto-hoe dirt/grass
         if (autoHoe.get()) {
             for (int x = -r; x <= r; x++) {
                 for (int y = -r; y <= r; y++) {
@@ -183,7 +218,7 @@ public class AutoCrop extends Module {
             }
         }
 
-        // Priority 3: Plant seeds on empty farmland
+        // Priority 4: Plant seeds on empty farmland
         if (replant.get()) {
             for (int x = -r; x <= r; x++) {
                 for (int y = -r; y <= r; y++) {
@@ -218,6 +253,20 @@ public class AutoCrop extends Module {
         }
 
         if (debug.get()) info("Harvested crop at " + pos.toShortString());
+    }
+
+    private void doBreakBlock(BlockPos pos) {
+        boolean shouldRotate = rotationMode.get() == RotationMode.Always || rotationMode.get() == RotationMode.Harvest;
+
+        if (shouldRotate) {
+            Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
+                mc.interactionManager.attackBlock(pos, Direction.UP);
+            });
+        } else {
+            mc.interactionManager.attackBlock(pos, Direction.UP);
+        }
+
+        if (debug.get()) info("Broke weed at " + pos.toShortString());
     }
 
     private void doTill(BlockPos pos) {
@@ -289,6 +338,12 @@ public class AutoCrop extends Module {
     // -------------------------
     // Checks
     // -------------------------
+
+    private boolean isBreakableWeed(BlockState state) {
+        return state.isOf(Blocks.SHORT_GRASS) ||
+               state.isOf(Blocks.TALL_GRASS) ||
+               state.isOf(Blocks.WILDFLOWERS);
+    }
 
     private boolean canTill(BlockPos pos, BlockState state) {
         // Can till: dirt, grass_block, dirt_path — only if the block above is air
