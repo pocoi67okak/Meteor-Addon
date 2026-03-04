@@ -250,7 +250,7 @@ public class AutoBuilder extends Module {
                 // Must be an obstruction since we filtered above
                 BlockPos finalTarget = target;
                 Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
-                    mc.interactionManager.updateBlockBreakingProgress(finalTarget, net.minecraft.util.math.Direction.UP);
+                    mc.interactionManager.attackBlock(finalTarget, net.minecraft.util.math.Direction.UP);
                     mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 });
                 placedThisTick.add(target);
