@@ -6,6 +6,7 @@ import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
@@ -218,10 +219,10 @@ public class AutoBuilder extends Module {
             // GoalGetToBlock will try to path to it. 
             BlockPos walkTarget = target.up(); 
             
-            if (distXY > 1.5 || mc.player.getY() < target.getY()) {
+            if (distXY > 2.0 || mc.player.getY() < target.getY()) {
                 if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    // Try to path near the target so we don't pick impossible air blocks
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new baritone.api.pathing.goals.GoalNear(target, 2));
+                    // Path precisely to the walkable target above the intended location
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(target));
                 }
                 break; // Break the while loop; wait until closer next tick
             } else {
@@ -247,8 +248,11 @@ public class AutoBuilder extends Module {
             boolean isReplaceable = mc.world.getBlockState(target).isReplaceable();
             if (!isReplaceable) {
                 // Must be an obstruction since queue.removeIf already handled correct blocks
-                mc.interactionManager.updateBlockBreakingProgress(target, net.minecraft.util.math.Direction.UP);
-                mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                BlockPos finalTarget = target;
+                Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
+                    mc.interactionManager.updateBlockBreakingProgress(finalTarget, net.minecraft.util.math.Direction.UP);
+                    mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                });
                 break; // Give time to break in this tick
             }
 
