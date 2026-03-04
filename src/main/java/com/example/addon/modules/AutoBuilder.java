@@ -21,6 +21,8 @@ import baritone.api.pathing.goals.GoalGetToBlock;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 public class AutoBuilder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -94,7 +96,7 @@ public class AutoBuilder extends Module {
     );
 
     private int timer;
-    private final List<BlockPos> queue = new ArrayList<>();
+    private final List<BlockPos> blueprint = new ArrayList<>();
     private BlockPos origin;
 
     public AutoBuilder() {
@@ -104,7 +106,7 @@ public class AutoBuilder extends Module {
     @Override
     public void onActivate() {
         timer = 0;
-        queue.clear();
+        blueprint.clear();
 
         if (mc.player == null) return;
 
@@ -130,7 +132,7 @@ public class AutoBuilder extends Module {
                 for (int z = startZ; z <= endZ; z++) {
                     // Only outline (walls)
                     if (x == startX || x == endX || z == startZ || z == endZ) {
-                        queue.add(origin.add(x, y, z));
+                        blueprint.add(origin.add(x, y, z));
                     }
                 }
             }
@@ -148,14 +150,20 @@ public class AutoBuilder extends Module {
             return;
         }
 
-        // Remove blocks that are already placed (solid blocks)
-        queue.removeIf(p -> {
-            if (mc.world.getBlockState(p).isReplaceable()) return false;
-            Block blockAt = mc.world.getBlockState(p).getBlock();
-            return blocks.get().contains(blockAt);
-        });
+        // Find what needs placing
+        List<BlockPos> activeQueue = new ArrayList<>();
+        for (BlockPos p : blueprint) {
+            if (mc.world.getBlockState(p).isReplaceable()) {
+                activeQueue.add(p);
+            } else {
+                Block blockAt = mc.world.getBlockState(p).getBlock();
+                if (!blocks.get().contains(blockAt)) {
+                    activeQueue.add(p); // Needs to be broken and replaced
+                }
+            }
+        }
 
-        if (queue.isEmpty()) {
+        if (activeQueue.isEmpty()) {
             info("Finished building.");
             if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
                 BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
@@ -165,6 +173,7 @@ public class AutoBuilder extends Module {
         }
 
         int placements = 0;
+        Set<BlockPos> placedThisTick = new HashSet<>();
 
         FindItemResult item = InvUtils.findInHotbar(itemStack -> {
             if (itemStack.getItem() instanceof BlockItem blockItem) {
@@ -179,25 +188,21 @@ public class AutoBuilder extends Module {
             return;
         }
 
-        while (!queue.isEmpty() && placements < blocksPerTick.get()) {
-            queue.removeIf(p -> {
-                if (mc.world.getBlockState(p).isReplaceable()) return false;
-                Block blockAt = mc.world.getBlockState(p).getBlock();
-                return blocks.get().contains(blockAt);
-            });
-            if (queue.isEmpty()) break;
+        while (!activeQueue.isEmpty() && placements < blocksPerTick.get()) {
+            // Remove those we just handled in this exact tick (simulate queue drain)
+            activeQueue.removeIf(placedThisTick::contains);
+            if (activeQueue.isEmpty()) break;
 
             // 1. Find the lowest Y level remaining in the queue
             int minY = Integer.MAX_VALUE;
-            for (BlockPos p : queue) {
+            for (BlockPos p : activeQueue) {
                 if (p.getY() < minY) minY = p.getY();
             }
 
             // 2. We want to place blocks sequentially along the perimeter
-            // Let's find a target that is adjacent to the LAST placed block, OR closest to the player
             BlockPos target = null;
             double minD = Double.MAX_VALUE;
-            for (BlockPos p : queue) {
+            for (BlockPos p : activeQueue) {
                 if (p.getY() == minY) {
                     double d = mc.player.squaredDistanceTo(Vec3d.ofCenter(p));
                     if (d < minD) {
@@ -215,13 +220,10 @@ public class AutoBuilder extends Module {
                 Math.pow(mc.player.getZ() - (target.getZ() + 0.5), 2)
             );
 
-            // We want to walk ON TOP of the previous layer, right above the target block.
-            // GoalGetToBlock will try to path to it. 
             BlockPos walkTarget = target.up(); 
             
             if (distXY > 2.0 || mc.player.getY() < target.getY()) {
                 if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    // Path precisely to the walkable target above the intended location
                     BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(target));
                 }
                 break; // Break the while loop; wait until closer next tick
@@ -234,36 +236,32 @@ public class AutoBuilder extends Module {
             // If we are right inside the block we want to place, jump up!
             if (intersects) {
                 mc.player.jump();
-                // We should also center ourselves over the block to avoid falling off
                 mc.player.setVelocity(0, mc.player.getVelocity().y, 0); 
                 break; // Give time to rise, don't place in this specific tick
             }
 
-            // If we are directly above the target, but we're falling, wait until we land or jump if needed
             if (mc.player.getY() <= target.getY() + 1.0 && !mc.player.isOnGround() && !intersects) {
-                 // Might be falling into the hole? we should place it.
+                 // Might be falling into the hole
             }
 
             // Attempt to place or break
             boolean isReplaceable = mc.world.getBlockState(target).isReplaceable();
             if (!isReplaceable) {
-                // Must be an obstruction since queue.removeIf already handled correct blocks
+                // Must be an obstruction since we filtered above
                 BlockPos finalTarget = target;
                 Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
                     mc.interactionManager.updateBlockBreakingProgress(finalTarget, net.minecraft.util.math.Direction.UP);
                     mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 });
+                placedThisTick.add(target);
                 break; // Give time to break in this tick
             }
 
             if (BlockUtils.place(target, item, rotate.get(), 50, true)) {
-                queue.remove(target);
+                placedThisTick.add(target);
                 placements++;
                 timer = delay.get();
-                
-                // After placing, if the next block requires climbing, our pathing check on the next tick will handle it.
             } else {
-                // Couldn't place (maybe no LOS or no supporting block at this exact angle), wait for next tick.
                 break;
             }
         }
