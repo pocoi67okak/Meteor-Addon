@@ -135,8 +135,7 @@ public class AutoBuilder extends Module {
             }
         }
         
-        // Sort bottom to top, then spiraling out or whatever works best (distance to player)
-        queue.sort(Comparator.comparingInt(BlockPos::getY).thenComparingDouble(pos -> mc.player.squaredDistanceTo(Vec3d.ofCenter((BlockPos) pos))));
+        // We no longer sort here since we do it dynamically per tick to avoid chaotic movements.
     }
 
     @EventHandler
@@ -148,63 +147,89 @@ public class AutoBuilder extends Module {
             return;
         }
 
-        int placements = 0;
+        // Remove blocks that are already placed (solid blocks)
+        queue.removeIf(p -> !mc.world.getBlockState(p).isReplaceable());
 
-        while (!queue.isEmpty() && placements < blocksPerTick.get()) {
-            BlockPos pos = queue.get(0);
-
-            // Skip if it's already a solid block
-            if (!BlockUtils.canPlace(pos)) {
-                queue.remove(0);
-                continue;
-            }
-
-            // Check distance. If it's too far (> 5 blocks), use Baritone to path closer
-            if (mc.player.squaredDistanceTo(Vec3d.ofCenter(pos)) > 25) {
-                if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    // Set goal to the block but not inside it (GoalGetToBlock gets adjacent)
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(pos));
-                }
-                return; // Wait until we are closer
-            } else {
-                // If we are close enough, cancel baritone pathing so we can place it
-                if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
-                }
-            }
-
-            FindItemResult item = InvUtils.findInHotbar(itemStack -> {
-                if (itemStack.getItem() instanceof BlockItem blockItem) {
-                    return blocks.get().contains(blockItem.getBlock());
-                }
-                return false;
-            });
-
-            if (!item.found()) {
-                info("No blocks found in hotbar, stopping.");
-                toggle();
-                return;
-            }
-
-            boolean placed = BlockUtils.place(pos, item, rotate.get(), 50, true);
-            
-            if (placed) {
-                placements++;
-                timer = delay.get();
-                queue.remove(0);
-            } else {
-                // Wait for the next tick to try again (e.g., neighbor might appear if built sequentially)
-                // But for now, just break loop and wait for next tick.
-                break;
-            }
-        }
-
-        if (queue.isEmpty() && placements == 0) {
+        if (queue.isEmpty()) {
             info("Finished building.");
             if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
                 BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
             }
             toggle();
+            return;
+        }
+
+        int placements = 0;
+
+        FindItemResult item = InvUtils.findInHotbar(itemStack -> {
+            if (itemStack.getItem() instanceof BlockItem blockItem) {
+                return blocks.get().contains(blockItem.getBlock());
+            }
+            return false;
+        });
+
+        if (!item.found()) {
+            info("No blocks found in hotbar, stopping.");
+            toggle();
+            return;
+        }
+
+        while (!queue.isEmpty() && placements < blocksPerTick.get()) {
+            queue.removeIf(p -> !mc.world.getBlockState(p).isReplaceable());
+            if (queue.isEmpty()) break;
+
+            // 1. Find the lowest Y level remaining in the queue
+            int minY = Integer.MAX_VALUE;
+            for (BlockPos p : queue) {
+                if (p.getY() < minY) minY = p.getY();
+            }
+
+            // 2. Find the closest block to the player on that Y level
+            BlockPos target = null;
+            double minD = Double.MAX_VALUE;
+            for (BlockPos p : queue) {
+                if (p.getY() == minY) {
+                    double d = mc.player.squaredDistanceTo(Vec3d.ofCenter(p));
+                    if (d < minD) {
+                        minD = d;
+                        target = p;
+                    }
+                }
+            }
+
+            if (target == null) break;
+
+            boolean intersects = mc.player.getBoundingBox().intersects(new net.minecraft.util.math.Box(target));
+            double dist = Math.sqrt(mc.player.squaredDistanceTo(Vec3d.ofCenter(target)));
+
+            // If we are too far (e.g. > 4 blocks) and NOT intersecting, Baritone helps us walk near it.
+            if (dist > 4.2 && !intersects) {
+                if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(target));
+                }
+                break; // Break the while loop; wait until closer next tick
+            } else {
+                if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
+                }
+            }
+
+            // If we are right inside the block we want to place, jump up!
+            if (intersects) {
+                mc.player.jump();
+                break; // Give time to rise, don't place in this specific tick
+            }
+
+            // Attempt to place
+            if (BlockUtils.place(target, item, rotate.get(), 50, true)) {
+                queue.remove(target);
+                placements++;
+                timer = delay.get();
+            } else {
+                // Couldn't place (maybe no LOS or no supporting block at this exact angle), wait for next tick.
+                // Could happen if we need to fall a bit or adjust position.
+                break;
+            }
         }
     }
 }
