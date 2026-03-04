@@ -95,9 +95,17 @@ public class AutoBuilder extends Module {
         .build()
     );
 
+    private final Setting<Boolean> placeSupports = sgGeneral.add(new BoolSetting.Builder()
+        .name("place-supports")
+        .description("Builds support blocks underneath air if you have no floor to build on.")
+        .defaultValue(true)
+        .build()
+    );
+
     private int timer;
     private final List<BlockPos> blueprint = new ArrayList<>();
     private BlockPos origin;
+    private BlockPos currentTarget = null;
 
     public AutoBuilder() {
         super(Categories.Player, "auto-build", "Builds a square/rectangular tube shape upwards and moves using Baritone.");
@@ -106,6 +114,7 @@ public class AutoBuilder extends Module {
     @Override
     public void onActivate() {
         timer = 0;
+        currentTarget = null;
         blueprint.clear();
 
         if (mc.player == null) return;
@@ -199,32 +208,34 @@ public class AutoBuilder extends Module {
                 if (p.getY() < minY) minY = p.getY();
             }
 
-            // 2. We want to place blocks sequentially along the perimeter
-            BlockPos target = null;
-            double minD = Double.MAX_VALUE;
-            for (BlockPos p : activeQueue) {
-                if (p.getY() == minY) {
-                    double d = mc.player.squaredDistanceTo(Vec3d.ofCenter(p));
-                    if (d < minD) {
-                        minD = d;
-                        target = p;
+            // 2. Lock a persistent target to prevent Baritone stuttering
+            if (currentTarget == null || !activeQueue.contains(currentTarget)) {
+                currentTarget = null;
+                double minD = Double.MAX_VALUE;
+                for (BlockPos p : activeQueue) {
+                    if (p.getY() == minY) {
+                        double d = mc.player.squaredDistanceTo(Vec3d.ofCenter(p));
+                        if (d < minD) {
+                            minD = d;
+                            currentTarget = p;
+                        }
                     }
                 }
             }
 
-            if (target == null) break;
+            if (currentTarget == null) break;
 
-            boolean intersects = mc.player.getBoundingBox().intersects(new net.minecraft.util.math.Box(target));
+            boolean intersects = mc.player.getBoundingBox().intersects(new net.minecraft.util.math.Box(currentTarget));
             double distXY = Math.sqrt(
-                Math.pow(mc.player.getX() - (target.getX() + 0.5), 2) + 
-                Math.pow(mc.player.getZ() - (target.getZ() + 0.5), 2)
+                Math.pow(mc.player.getX() - (currentTarget.getX() + 0.5), 2) + 
+                Math.pow(mc.player.getZ() - (currentTarget.getZ() + 0.5), 2)
             );
 
-            BlockPos walkTarget = target.up(); 
+            BlockPos walkTarget = currentTarget.up(); 
             
-            if (distXY > 2.0 || mc.player.getY() < target.getY()) {
+            if (distXY > 2.0 || mc.player.getY() < currentTarget.getY()) {
                 if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(target));
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(currentTarget));
                 }
                 break; // Break the while loop; wait until closer next tick
             } else {
@@ -240,25 +251,32 @@ public class AutoBuilder extends Module {
                 break; // Give time to rise, don't place in this specific tick
             }
 
-            if (mc.player.getY() <= target.getY() + 1.0 && !mc.player.isOnGround() && !intersects) {
+            if (mc.player.getY() <= currentTarget.getY() + 1.0 && !mc.player.isOnGround() && !intersects) {
                  // Might be falling into the hole
             }
 
+            // Check if we need a support block
+            if (placeSupports.get() && mc.world.getBlockState(currentTarget.down()).isReplaceable()) {
+                BlockUtils.place(currentTarget.down(), item, rotate.get(), 50, true);
+                break; // Placed support, wait for next tick to place the actual block
+            }
+
             // Attempt to place or break
-            boolean isReplaceable = mc.world.getBlockState(target).isReplaceable();
+            boolean isReplaceable = mc.world.getBlockState(currentTarget).isReplaceable();
             if (!isReplaceable) {
                 // Must be an obstruction since we filtered above
-                BlockPos finalTarget = target;
+                BlockPos finalTarget = currentTarget;
                 Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
                     mc.interactionManager.attackBlock(finalTarget, net.minecraft.util.math.Direction.UP);
                     mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 });
-                placedThisTick.add(target);
+                placedThisTick.add(currentTarget);
                 break; // Give time to break in this tick
             }
 
-            if (BlockUtils.place(target, item, rotate.get(), 50, true)) {
-                placedThisTick.add(target);
+            if (BlockUtils.place(currentTarget, item, rotate.get(), 50, true)) {
+                placedThisTick.add(currentTarget);
+                currentTarget = null; // Clear lock so we find a new one next tick
                 placements++;
                 timer = delay.get();
             } else {
