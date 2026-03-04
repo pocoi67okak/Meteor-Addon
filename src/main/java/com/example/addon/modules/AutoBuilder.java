@@ -29,7 +29,7 @@ public class AutoBuilder extends Module {
         .description("The width of the structure (X axis).")
         .defaultValue(3)
         .min(1)
-        .sliderMax(10)
+        .sliderMax(100)
         .build()
     );
 
@@ -38,7 +38,7 @@ public class AutoBuilder extends Module {
         .description("The length of the structure (Z axis).")
         .defaultValue(3)
         .min(1)
-        .sliderMax(10)
+        .sliderMax(100)
         .build()
     );
 
@@ -47,7 +47,7 @@ public class AutoBuilder extends Module {
         .description("The height of the structure.")
         .defaultValue(5)
         .min(1)
-        .sliderMax(20)
+        .sliderMax(300)
         .build()
     );
 
@@ -148,7 +148,11 @@ public class AutoBuilder extends Module {
         }
 
         // Remove blocks that are already placed (solid blocks)
-        queue.removeIf(p -> !mc.world.getBlockState(p).isReplaceable());
+        queue.removeIf(p -> {
+            if (mc.world.getBlockState(p).isReplaceable()) return false;
+            Block blockAt = mc.world.getBlockState(p).getBlock();
+            return blocks.get().contains(blockAt);
+        });
 
         if (queue.isEmpty()) {
             info("Finished building.");
@@ -175,7 +179,11 @@ public class AutoBuilder extends Module {
         }
 
         while (!queue.isEmpty() && placements < blocksPerTick.get()) {
-            queue.removeIf(p -> !mc.world.getBlockState(p).isReplaceable());
+            queue.removeIf(p -> {
+                if (mc.world.getBlockState(p).isReplaceable()) return false;
+                Block blockAt = mc.world.getBlockState(p).getBlock();
+                return blocks.get().contains(blockAt);
+            });
             if (queue.isEmpty()) break;
 
             // 1. Find the lowest Y level remaining in the queue
@@ -210,11 +218,10 @@ public class AutoBuilder extends Module {
             // GoalGetToBlock will try to path to it. 
             BlockPos walkTarget = target.up(); 
             
-            // If we are relatively far horizontally, or lower than the target
             if (distXY > 1.5 || mc.player.getY() < target.getY()) {
                 if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    // Try to path to the block right above the target so we walk on the wall
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalBlock(walkTarget));
+                    // Try to path near the target so we don't pick impossible air blocks
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new baritone.api.pathing.goals.GoalNear(target, 2));
                 }
                 break; // Break the while loop; wait until closer next tick
             } else {
@@ -236,7 +243,15 @@ public class AutoBuilder extends Module {
                  // Might be falling into the hole? we should place it.
             }
 
-            // Attempt to place
+            // Attempt to place or break
+            boolean isReplaceable = mc.world.getBlockState(target).isReplaceable();
+            if (!isReplaceable) {
+                // Must be an obstruction since queue.removeIf already handled correct blocks
+                mc.interactionManager.updateBlockBreakingProgress(target, net.minecraft.util.math.Direction.UP);
+                mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                break; // Give time to break in this tick
+            }
+
             if (BlockUtils.place(target, item, rotate.get(), 50, true)) {
                 queue.remove(target);
                 placements++;
