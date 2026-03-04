@@ -1,6 +1,7 @@
 package com.example.addon;
 
 import com.example.addon.modules.AutoCrop;
+import com.example.addon.modules.AutoBuilder;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
@@ -16,6 +17,7 @@ public class AutocropAddon extends MeteorAddon {
 
         // Регистрация модуля
         Modules.get().add(new AutoCrop());
+        Modules.get().add(new AutoBuilder());
     }
 
     @Override
