@@ -164,6 +164,13 @@ public class AutoBuilder extends Module {
         for (BlockPos p : blueprint) {
             if (mc.world.getBlockState(p).isReplaceable()) {
                 activeQueue.add(p);
+                // Dynamically add support blocks if placeSupports is true!
+                if (placeSupports.get()) {
+                    BlockPos support = p.down();
+                    if (mc.world.getBlockState(support).isReplaceable()) {
+                        activeQueue.add(support);
+                    }
+                }
             } else {
                 Block blockAt = mc.world.getBlockState(p).getBlock();
                 if (!blocks.get().contains(blockAt)) {
@@ -231,11 +238,10 @@ public class AutoBuilder extends Module {
                 Math.pow(mc.player.getZ() - (currentTarget.getZ() + 0.5), 2)
             );
 
-            BlockPos walkTarget = currentTarget.up(); 
-            
-            if (distXY > 2.0 || mc.player.getY() < currentTarget.getY()) {
+            // Path to the block to enter it.
+            if (distXY > 0.8 || mc.player.getY() < currentTarget.getY()) {
                 if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(currentTarget));
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalBlock(currentTarget));
                 }
                 break; // Break the while loop; wait until closer next tick
             } else {
@@ -253,12 +259,6 @@ public class AutoBuilder extends Module {
 
             if (mc.player.getY() <= currentTarget.getY() + 1.0 && !mc.player.isOnGround() && !intersects) {
                  // Might be falling into the hole
-            }
-
-            // Check if we need a support block
-            if (placeSupports.get() && mc.world.getBlockState(currentTarget.down()).isReplaceable()) {
-                BlockUtils.place(currentTarget.down(), item, rotate.get(), 50, true);
-                break; // Placed support, wait for next tick to place the actual block
             }
 
             // Attempt to place or break
@@ -280,6 +280,7 @@ public class AutoBuilder extends Module {
                 placements++;
                 timer = delay.get();
             } else {
+                currentTarget = null;
                 break;
             }
         }
