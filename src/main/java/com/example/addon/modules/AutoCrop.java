@@ -141,6 +141,13 @@ public class AutoCrop extends Module {
         .build()
     );
 
+    private final Setting<Boolean> harvestSugarCane = sgCrops.add(new BoolSetting.Builder()
+        .name("sugar-cane")
+        .description("Harvest sugar cane (leaves the bottom block).")
+        .defaultValue(true)
+        .build()
+    );
+
     private int timer = 0;
 
     public AutoCrop() {
@@ -172,7 +179,7 @@ public class AutoCrop extends Module {
                         BlockPos pos = playerPos.add(x, y, z);
                         BlockState state = mc.world.getBlockState(pos);
 
-                        if (isFullyGrownCrop(state) && isCropEnabled(state)) {
+                        if (isFullyGrownCrop(pos, state) && isCropEnabled(state)) {
                             doHarvest(pos, state);
                             timer = delay.get();
                             return;
@@ -382,10 +389,11 @@ public class AutoCrop extends Module {
         if (state.isOf(Blocks.BEETROOTS)) return harvestBeetroots.get();
         if (state.isOf(Blocks.NETHER_WART)) return harvestNetherWart.get();
         if (state.isOf(Blocks.COCOA)) return harvestCocoa.get();
+        if (state.isOf(Blocks.SUGAR_CANE)) return harvestSugarCane.get();
         return false;
     }
 
-    private boolean isFullyGrownCrop(BlockState state) {
+    private boolean isFullyGrownCrop(BlockPos pos, BlockState state) {
         if (state.getBlock() instanceof CropBlock crop) {
             return crop.isMature(state);
         }
@@ -394,6 +402,11 @@ public class AutoCrop extends Module {
         }
         if (state.isOf(Blocks.COCOA)) {
             return state.get(CocoaBlock.AGE) >= 2;
+        }
+        if (state.isOf(Blocks.SUGAR_CANE)) {
+            BlockState below = mc.world.getBlockState(pos.down());
+            BlockState below2 = mc.world.getBlockState(pos.down(2));
+            return below.isOf(Blocks.SUGAR_CANE) && !below2.isOf(Blocks.SUGAR_CANE);
         }
         return false;
     }
