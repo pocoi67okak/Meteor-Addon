@@ -12,6 +12,10 @@ import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.BlockItem;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import baritone.api.BaritoneAPI;
+import baritone.api.pathing.goals.GoalBlock;
+import baritone.api.pathing.goals.GoalGetToBlock;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -50,9 +54,9 @@ public class AutoBuilder extends Module {
     private final Setting<Integer> maxHeightLimit = sgGeneral.add(new IntSetting.Builder()
         .name("max-height-limit")
         .description("Max height limit before warning.")
-        .defaultValue(50)
+        .defaultValue(300)
         .min(1)
-        .sliderMax(256)
+        .sliderMax(320)
         .build()
     );
 
@@ -90,9 +94,10 @@ public class AutoBuilder extends Module {
 
     private int timer;
     private final List<BlockPos> queue = new ArrayList<>();
+    private BlockPos origin;
 
     public AutoBuilder() {
-        super(Categories.Player, "auto-build", "Builds a square/rectangular tube shape upwards.");
+        super(Categories.Player, "auto-build", "Builds a square/rectangular tube shape upwards and moves using Baritone.");
     }
 
     @Override
@@ -108,7 +113,7 @@ public class AutoBuilder extends Module {
             return;
         }
 
-        BlockPos origin = mc.player.getBlockPos();
+        origin = mc.player.getBlockPos();
         int w = bWidth.get();
         int l = bLength.get();
         int h = bHeight.get();
@@ -130,8 +135,8 @@ public class AutoBuilder extends Module {
             }
         }
         
-        // Sort bottom to top
-        queue.sort(Comparator.comparingInt(BlockPos::getY));
+        // Sort bottom to top, then spiraling out or whatever works best (distance to player)
+        queue.sort(Comparator.comparingInt(BlockPos::getY).thenComparingDouble(pos -> mc.player.squaredDistanceTo(Vec3d.ofCenter((BlockPos) pos))));
     }
 
     @EventHandler
@@ -152,6 +157,20 @@ public class AutoBuilder extends Module {
             if (!BlockUtils.canPlace(pos)) {
                 queue.remove(0);
                 continue;
+            }
+
+            // Check distance. If it's too far (> 5 blocks), use Baritone to path closer
+            if (mc.player.squaredDistanceTo(Vec3d.ofCenter(pos)) > 25) {
+                if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
+                    // Set goal to the block but not inside it (GoalGetToBlock gets adjacent)
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(pos));
+                }
+                return; // Wait until we are closer
+            } else {
+                // If we are close enough, cancel baritone pathing so we can place it
+                if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
+                }
             }
 
             FindItemResult item = InvUtils.findInHotbar(itemStack -> {
@@ -182,6 +201,9 @@ public class AutoBuilder extends Module {
 
         if (queue.isEmpty() && placements == 0) {
             info("Finished building.");
+            if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
+                BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
+            }
             toggle();
         }
     }
