@@ -184,7 +184,8 @@ public class AutoBuilder extends Module {
                 if (p.getY() < minY) minY = p.getY();
             }
 
-            // 2. Find the closest block to the player on that Y level
+            // 2. We want to place blocks sequentially along the perimeter
+            // Let's find a target that is adjacent to the LAST placed block, OR closest to the player
             BlockPos target = null;
             double minD = Double.MAX_VALUE;
             for (BlockPos p : queue) {
@@ -200,12 +201,20 @@ public class AutoBuilder extends Module {
             if (target == null) break;
 
             boolean intersects = mc.player.getBoundingBox().intersects(new net.minecraft.util.math.Box(target));
-            double dist = Math.sqrt(mc.player.squaredDistanceTo(Vec3d.ofCenter(target)));
+            double distXY = Math.sqrt(
+                Math.pow(mc.player.getX() - (target.getX() + 0.5), 2) + 
+                Math.pow(mc.player.getZ() - (target.getZ() + 0.5), 2)
+            );
 
-            // If we are too far (e.g. > 4 blocks) and NOT intersecting, Baritone helps us walk near it.
-            if (dist > 4.2 && !intersects) {
+            // We want to walk ON TOP of the previous layer, right above the target block.
+            // GoalGetToBlock will try to path to it. 
+            BlockPos walkTarget = target.up(); 
+            
+            // If we are relatively far horizontally, or lower than the target
+            if (distXY > 1.5 || mc.player.getY() < target.getY()) {
                 if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalGetToBlock(target));
+                    // Try to path to the block right above the target so we walk on the wall
+                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalBlock(walkTarget));
                 }
                 break; // Break the while loop; wait until closer next tick
             } else {
@@ -217,7 +226,14 @@ public class AutoBuilder extends Module {
             // If we are right inside the block we want to place, jump up!
             if (intersects) {
                 mc.player.jump();
+                // We should also center ourselves over the block to avoid falling off
+                mc.player.setVelocity(0, mc.player.getVelocity().y, 0); 
                 break; // Give time to rise, don't place in this specific tick
+            }
+
+            // If we are directly above the target, but we're falling, wait until we land or jump if needed
+            if (mc.player.getY() <= target.getY() + 1.0 && !mc.player.isOnGround() && !intersects) {
+                 // Might be falling into the hole? we should place it.
             }
 
             // Attempt to place
@@ -225,9 +241,10 @@ public class AutoBuilder extends Module {
                 queue.remove(target);
                 placements++;
                 timer = delay.get();
+                
+                // After placing, if the next block requires climbing, our pathing check on the next tick will handle it.
             } else {
                 // Couldn't place (maybe no LOS or no supporting block at this exact angle), wait for next tick.
-                // Could happen if we need to fall a bit or adjust position.
                 break;
             }
         }
