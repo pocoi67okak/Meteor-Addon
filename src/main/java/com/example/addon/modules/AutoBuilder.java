@@ -16,12 +16,12 @@ import net.minecraft.item.BlockItem;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class AutoBuilder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -113,6 +113,7 @@ public class AutoBuilder extends Module {
 
     private int timer;
     private final List<BlockPos> blueprint = new ArrayList<>();
+    private final Set<BlockPos> blueprintSet = new HashSet<>(); // быстрый lookup
     private BlockPos origin;
     private BlockPos currentTarget = null;
 
@@ -125,6 +126,7 @@ public class AutoBuilder extends Module {
         timer = 0;
         currentTarget = null;
         blueprint.clear();
+        blueprintSet.clear();
 
         if (mc.player == null || mc.world == null) return;
 
@@ -145,12 +147,13 @@ public class AutoBuilder extends Module {
         int startZ = -(l / 2);
         int endZ = startZ + l - 1;
 
-        // Blueprint — стены (периметр), послойно снизу вверх
         for (int y = 0; y < h; y++) {
             for (int x = startX; x <= endX; x++) {
                 for (int z = startZ; z <= endZ; z++) {
                     if (x == startX || x == endX || z == startZ || z == endZ) {
-                        blueprint.add(origin.add(x, y, z));
+                        BlockPos pos = origin.add(x, y, z);
+                        blueprint.add(pos);
+                        blueprintSet.add(pos);
                     }
                 }
             }
@@ -162,6 +165,7 @@ public class AutoBuilder extends Module {
     @Override
     public void onDeactivate() {
         blueprint.clear();
+        blueprintSet.clear();
         currentTarget = null;
     }
 
@@ -188,7 +192,7 @@ public class AutoBuilder extends Module {
             return;
         }
 
-        // Найти следующую цель (незаполненный блок)
+        // Найти следующую цель
         currentTarget = findNextTarget();
 
         if (currentTarget == null) {
@@ -207,10 +211,7 @@ public class AutoBuilder extends Module {
         }
 
         // Далеко — идём к цели
-        walkToward(currentTarget);
-
-        // Ломаем блоки на пути
-        breakObstaclesInPath(currentTarget);
+        walkToward(currentTarget, item);
     }
 
     // -------------------------
@@ -218,9 +219,9 @@ public class AutoBuilder extends Module {
     // -------------------------
 
     /**
-     * Идти в сторону цели (простая прямая навигация)
+     * Идти в сторону цели, обходя/ломая препятствия
      */
-    private void walkToward(BlockPos target) {
+    private void walkToward(BlockPos target, FindItemResult item) {
         Vec3d playerPos = mc.player.getPos();
         Vec3d targetVec = Vec3d.ofCenter(target);
 
@@ -228,36 +229,87 @@ public class AutoBuilder extends Module {
         double dz = targetVec.z - playerPos.z;
         double horizontalDist = Math.sqrt(dx * dx + dz * dz);
 
-        if (horizontalDist < 0.3) return; // Уже на месте по горизонтали
+        if (horizontalDist < 0.3) {
+            // По горизонтали на месте, но цель выше — pillar up
+            if (target.getY() > mc.player.getBlockPos().getY()) {
+                doPillarUp(item);
+            }
+            return;
+        }
 
-        // Нормализуем направление и задаём скорость
+        // Задаём скорость в направлении цели
         double motionX = (dx / horizontalDist) * WALK_SPEED;
         double motionZ = (dz / horizontalDist) * WALK_SPEED;
-
-        // Сохраняем вертикальную скорость (гравитация/прыжок)
         double motionY = mc.player.getVelocity().y;
 
         mc.player.setVelocity(motionX, motionY, motionZ);
 
-        // Нужно прыгнуть?
+        // Анализируем блоки перед игроком
         BlockPos feetPos = mc.player.getBlockPos();
         BlockPos inFront = getBlockInFront(feetPos, dx, dz);
+        BlockPos headFront = inFront.up();
 
-        // Прыгаем если перед нами твёрдый блок и мы стоим на земле
-        if (mc.player.isOnGround()) {
-            BlockState frontState = mc.world.getBlockState(inFront);
-            if (!frontState.isAir() && !frontState.isReplaceable()) {
-                mc.player.jump();
+        BlockState frontState = mc.world.getBlockState(inFront);
+        BlockState headState = mc.world.getBlockState(headFront);
+
+        boolean frontSolid = !frontState.isAir() && !frontState.isReplaceable();
+        boolean headSolid = !headState.isAir() && !headState.isReplaceable();
+
+        if (frontSolid) {
+            if (isBlueprintBlock(inFront)) {
+                // Это наш блок — запрыгиваем НА него
+                if (mc.player.isOnGround()) {
+                    mc.player.jump();
+                    if (debug.get()) info("Jumping onto built block at %s", inFront.toShortString());
+                }
+                // Если над нашим блоком тоже наш блок (стена) — это не препятствие, обходим
+            } else {
+                // Чужой блок — ломаем
+                Vec3d eyePos = mc.player.getEyePos();
+                if (Math.sqrt(eyePos.squaredDistanceTo(Vec3d.ofCenter(inFront))) <= PLACE_RANGE) {
+                    doBreak(inFront);
+                    timer = delay.get();
+                    return;
+                }
             }
-            // Или если цель выше нас
-            if (target.getY() > feetPos.getY() && horizontalDist < 2.0) {
-                mc.player.jump();
+        }
+
+        if (headSolid && !isBlueprintBlock(headFront)) {
+            // Чужой блок на уровне головы — ломаем
+            Vec3d eyePos = mc.player.getEyePos();
+            if (Math.sqrt(eyePos.squaredDistanceTo(Vec3d.ofCenter(headFront))) <= PLACE_RANGE) {
+                doBreak(headFront);
+                timer = delay.get();
+                return;
             }
+        }
+
+        // Цель выше — прыгаем
+        if (mc.player.isOnGround() && target.getY() > feetPos.getY()) {
+            mc.player.jump();
         }
     }
 
     /**
-     * Получить позицию блока перед игроком по направлению движения
+     * Pillar up — прыгнуть и поставить блок под ногами
+     */
+    private void doPillarUp(FindItemResult item) {
+        if (mc.player.isOnGround()) {
+            mc.player.jump();
+            if (debug.get()) info("Pillar up — jumping");
+        } else if (mc.player.getVelocity().y > 0.1) {
+            // В воздухе, поднимаемся — ставим блок под ногами
+            BlockPos below = mc.player.getBlockPos().down();
+            if (mc.world.getBlockState(below).isReplaceable()) {
+                BlockUtils.place(below, item, rotate.get(), 50, true);
+                if (debug.get()) info("Pillar up — placed at %s", below.toShortString());
+            }
+        }
+        timer = 1; // Маленькая задержка для анимации прыжка
+    }
+
+    /**
+     * Получить позицию блока перед игроком
      */
     private BlockPos getBlockInFront(BlockPos feetPos, double dx, double dz) {
         int frontX = dx > 0.3 ? 1 : (dx < -0.3 ? -1 : 0);
@@ -265,44 +317,17 @@ public class AutoBuilder extends Module {
         return feetPos.add(frontX, 0, frontZ);
     }
 
-    /**
-     * Ломать блоки, мешающие пройти к цели
-     */
-    private void breakObstaclesInPath(BlockPos target) {
-        Vec3d playerPos = mc.player.getPos();
-        double dx = Vec3d.ofCenter(target).x - playerPos.x;
-        double dz = Vec3d.ofCenter(target).z - playerPos.z;
-
-        BlockPos feetPos = mc.player.getBlockPos();
-        BlockPos inFront = getBlockInFront(feetPos, dx, dz);
-        BlockPos headLevel = inFront.up();
-
-        // Ломаем блоки на уровне ног и головы перед игроком
-        Vec3d eyePos = mc.player.getEyePos();
-
-        if (isBreakableObstacle(inFront) && Math.sqrt(eyePos.squaredDistanceTo(Vec3d.ofCenter(inFront))) <= PLACE_RANGE) {
-            doBreak(inFront);
-            timer = delay.get();
-            return;
-        }
-
-        if (isBreakableObstacle(headLevel) && Math.sqrt(eyePos.squaredDistanceTo(Vec3d.ofCenter(headLevel))) <= PLACE_RANGE) {
-            doBreak(headLevel);
-            timer = delay.get();
-        }
-    }
-
     // -------------------------
     // Действия
     // -------------------------
 
     /**
-     * Выполнить работу по позиции: сломать неправильный блок или поставить нужный
+     * Сломать неправильный блок или поставить нужный
      */
     private void doWork(BlockPos pos, FindItemResult item) {
         BlockState state = mc.world.getBlockState(pos);
 
-        // Неправильный блок — ломаем
+        // Неправильный блок (не из списка) — ломаем
         if (!state.isReplaceable() && !isCorrectBlock(pos)) {
             doBreak(pos);
             timer = delay.get();
@@ -313,12 +338,12 @@ public class AutoBuilder extends Module {
         if (state.isReplaceable()) {
             int placed = 0;
 
-            // Support-блоки сначала
+            // Support-блоки
             if (placeSupports.get()) {
                 BlockPos below = pos.down();
                 Vec3d eyePos = mc.player.getEyePos();
                 if (mc.world.getBlockState(below).isReplaceable()
-                    && !blueprint.contains(below)
+                    && !blueprintSet.contains(below)
                     && Math.sqrt(eyePos.squaredDistanceTo(Vec3d.ofCenter(below))) <= PLACE_RANGE) {
                     if (BlockUtils.place(below, item, rotate.get(), 50, true)) {
                         placed++;
@@ -327,7 +352,6 @@ public class AutoBuilder extends Module {
                 }
             }
 
-            // Основной блок
             if (placed < blocksPerTick.get()) {
                 if (BlockUtils.place(pos, item, rotate.get(), 50, true)) {
                     placed++;
@@ -339,9 +363,6 @@ public class AutoBuilder extends Module {
         }
     }
 
-    /**
-     * Сломать блок
-     */
     private void doBreak(BlockPos pos) {
         if (rotate.get()) {
             Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
@@ -360,25 +381,21 @@ public class AutoBuilder extends Module {
     // -------------------------
 
     /**
-     * Найти следующий блок для работы (послойно, ближайший к игроку)
+     * Найти следующий блок (послойно снизу, ближайший)
      */
     private BlockPos findNextTarget() {
         Vec3d playerPos = mc.player.getPos();
 
-        // Ищем послойно снизу вверх
         int minY = Integer.MAX_VALUE;
         for (BlockPos pos : blueprint) {
             if (needsAction(pos) && pos.getY() < minY) {
                 minY = pos.getY();
             }
         }
-
         if (minY == Integer.MAX_VALUE) return null;
 
-        // На найденном слое — берём ближайший
         BlockPos closest = null;
         double closestDist = Double.MAX_VALUE;
-
         for (BlockPos pos : blueprint) {
             if (pos.getY() == minY && needsAction(pos)) {
                 double dist = playerPos.squaredDistanceTo(Vec3d.ofCenter(pos));
@@ -388,8 +405,14 @@ public class AutoBuilder extends Module {
                 }
             }
         }
-
         return closest;
+    }
+
+    /**
+     * Этот блок — часть blueprint и правильно установлен?
+     */
+    private boolean isBlueprintBlock(BlockPos pos) {
+        return blueprintSet.contains(pos) && isCorrectBlock(pos);
     }
 
     private boolean needsAction(BlockPos pos) {
@@ -401,10 +424,5 @@ public class AutoBuilder extends Module {
     private boolean isCorrectBlock(BlockPos pos) {
         Block blockAt = mc.world.getBlockState(pos).getBlock();
         return blocks.get().contains(blockAt);
-    }
-
-    private boolean isBreakableObstacle(BlockPos pos) {
-        BlockState state = mc.world.getBlockState(pos);
-        return !state.isAir() && !state.isReplaceable() && state.getHardness(mc.world, pos) >= 0;
     }
 }
