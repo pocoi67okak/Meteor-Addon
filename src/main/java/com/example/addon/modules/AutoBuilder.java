@@ -12,17 +12,14 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.item.BlockItem;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
-import baritone.api.BaritoneAPI;
-import baritone.api.pathing.goals.GoalBlock;
-import baritone.api.pathing.goals.GoalGetToBlock;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.HashSet;
-import java.util.Set;
 
 public class AutoBuilder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -102,95 +99,84 @@ public class AutoBuilder extends Module {
         .build()
     );
 
+    private final Setting<Boolean> debug = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug")
+        .description("Send local debug messages to chat.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private static final double PLACE_RANGE = 4.5;
+
     private int timer;
     private final List<BlockPos> blueprint = new ArrayList<>();
-    private BlockPos origin;
-    private BlockPos currentTarget = null;
+    private int currentLayer = 0;                 // текущий слой (Y-уровень) который строим
+    private BlockPos origin;                      // начальная позиция игрока
+    private BlockPos pillarBase;                  // позиция для pillar-up (центр структуры)
+    private boolean needsPillarUp = false;        // нужно ли подняться
 
     public AutoBuilder() {
-        super(Categories.Player, "auto-build", "Builds a square/rectangular tube shape upwards and moves using Baritone.");
+        super(Categories.Player, "auto-build", "Builds a square/rectangular tube shape upwards.");
     }
 
     @Override
     public void onActivate() {
         timer = 0;
-        currentTarget = null;
+        currentLayer = 0;
+        needsPillarUp = false;
         blueprint.clear();
 
-        if (mc.player == null) return;
+        if (mc.player == null || mc.world == null) return;
 
         if (bHeight.get() > maxHeightLimit.get()) {
-            info("Too High!");
+            info("Height exceeds max limit!");
             toggle();
             return;
         }
 
         origin = mc.player.getBlockPos();
+        pillarBase = origin; // центр для pillar-up
+
         int w = bWidth.get();
         int l = bLength.get();
         int h = bHeight.get();
 
         int startX = -(w / 2);
         int endX = startX + w - 1;
-        
         int startZ = -(l / 2);
         int endZ = startZ + l - 1;
 
+        // Генерируем blueprint — только стены (периметр)
         for (int y = 0; y < h; y++) {
             for (int x = startX; x <= endX; x++) {
                 for (int z = startZ; z <= endZ; z++) {
-                    // Only outline (walls)
                     if (x == startX || x == endX || z == startZ || z == endZ) {
                         blueprint.add(origin.add(x, y, z));
                     }
                 }
             }
         }
-        
-        // We no longer sort here since we do it dynamically per tick to avoid chaotic movements.
+
+        info("Building %d blocks (%dx%dx%d)", blueprint.size(), w, l, h);
+    }
+
+    @Override
+    public void onDeactivate() {
+        blueprint.clear();
+        currentLayer = 0;
+        needsPillarUp = false;
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.player == null) return;
+        if (mc.player == null || mc.world == null || mc.interactionManager == null) return;
 
         if (timer > 0) {
             timer--;
             return;
         }
 
-        // Find what needs placing
-        List<BlockPos> activeQueue = new ArrayList<>();
-        for (BlockPos p : blueprint) {
-            if (mc.world.getBlockState(p).isReplaceable()) {
-                activeQueue.add(p);
-                // Dynamically add support blocks if placeSupports is true!
-                if (placeSupports.get()) {
-                    BlockPos support = p.down();
-                    if (mc.world.getBlockState(support).isReplaceable()) {
-                        activeQueue.add(support);
-                    }
-                }
-            } else {
-                Block blockAt = mc.world.getBlockState(p).getBlock();
-                if (!blocks.get().contains(blockAt)) {
-                    activeQueue.add(p); // Needs to be broken and replaced
-                }
-            }
-        }
-
-        if (activeQueue.isEmpty()) {
-            info("Finished building.");
-            if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
-            }
-            toggle();
-            return;
-        }
-
-        int placements = 0;
-        Set<BlockPos> placedThisTick = new HashSet<>();
-
+        // Найти блок в хотбаре
         FindItemResult item = InvUtils.findInHotbar(itemStack -> {
             if (itemStack.getItem() instanceof BlockItem blockItem) {
                 return blocks.get().contains(blockItem.getBlock());
@@ -204,85 +190,154 @@ public class AutoBuilder extends Module {
             return;
         }
 
-        while (!activeQueue.isEmpty() && placements < blocksPerTick.get()) {
-            // Remove those we just handled in this exact tick (simulate queue drain)
-            activeQueue.removeIf(placedThisTick::contains);
-            if (activeQueue.isEmpty()) break;
+        // Собрать незаполненные блоки текущего слоя
+        int targetY = origin.getY() + currentLayer;
+        List<BlockPos> layerQueue = getLayerQueue(targetY);
 
-            // 1. Find the lowest Y level remaining in the queue
-            int minY = Integer.MAX_VALUE;
-            for (BlockPos p : activeQueue) {
-                if (p.getY() < minY) minY = p.getY();
-            }
-
-            // 2. Lock a persistent target to prevent Baritone stuttering
-            if (currentTarget == null || !activeQueue.contains(currentTarget)) {
-                currentTarget = null;
-                double minD = Double.MAX_VALUE;
-                for (BlockPos p : activeQueue) {
-                    if (p.getY() == minY) {
-                        double d = mc.player.squaredDistanceTo(Vec3d.ofCenter(p));
-                        if (d < minD) {
-                            minD = d;
-                            currentTarget = p;
-                        }
-                    }
+        // Если нужны support-блоки, добавляем их
+        if (placeSupports.get()) {
+            List<BlockPos> supports = new ArrayList<>();
+            for (BlockPos pos : layerQueue) {
+                BlockPos below = pos.down();
+                if (mc.world.getBlockState(below).isReplaceable() && !blueprint.contains(below)) {
+                    supports.add(below);
                 }
             }
-
-            if (currentTarget == null) break;
-
-            boolean intersects = mc.player.getBoundingBox().intersects(new net.minecraft.util.math.Box(currentTarget));
-            double distXY = Math.sqrt(
-                Math.pow(mc.player.getX() - (currentTarget.getX() + 0.5), 2) + 
-                Math.pow(mc.player.getZ() - (currentTarget.getZ() + 0.5), 2)
-            );
-
-            // Path to the block to enter it.
-            if (distXY > 0.8 || mc.player.getY() < currentTarget.getY()) {
-                if (!BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().setGoalAndPath(new GoalBlock(currentTarget));
-                }
-                break; // Break the while loop; wait until closer next tick
-            } else {
-                if (BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().isActive()) {
-                    BaritoneAPI.getProvider().getPrimaryBaritone().getCustomGoalProcess().onLostControl();
-                }
+            // Саппорты ставим первыми
+            supports.removeIf(p -> !mc.world.getBlockState(p).isReplaceable());
+            if (!supports.isEmpty()) {
+                layerQueue.addAll(0, supports);
             }
+        }
 
-            // If we are right inside the block we want to place, jump up!
-            if (intersects) {
-                mc.player.jump();
-                mc.player.setVelocity(0, mc.player.getVelocity().y, 0); 
-                break; // Give time to rise, don't place in this specific tick
+        // Если текущий слой завершён — переходим к следующему
+        if (layerQueue.isEmpty()) {
+            currentLayer++;
+            if (currentLayer >= bHeight.get()) {
+                info("Finished building!");
+                toggle();
+                return;
             }
+            // Проверяем, нужно ли подняться
+            needsPillarUp = true;
+            if (debug.get()) info("Layer %d complete, moving to layer %d", currentLayer - 1, currentLayer);
+            return;
+        }
 
-            if (mc.player.getY() <= currentTarget.getY() + 1.0 && !mc.player.isOnGround() && !intersects) {
-                 // Might be falling into the hole
-            }
+        // Если нужно подняться — pillar up
+        if (needsPillarUp) {
+            int newTargetY = origin.getY() + currentLayer;
+            double playerY = mc.player.getY();
 
-            // Attempt to place or break
-            boolean isReplaceable = mc.world.getBlockState(currentTarget).isReplaceable();
-            if (!isReplaceable) {
-                // Must be an obstruction since we filtered above
-                BlockPos finalTarget = currentTarget;
-                Rotations.rotate(Rotations.getYaw(finalTarget), Rotations.getPitch(finalTarget), () -> {
-                    mc.interactionManager.attackBlock(finalTarget, net.minecraft.util.math.Direction.UP);
-                    mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-                });
-                placedThisTick.add(currentTarget);
-                break; // Give time to break in this tick
-            }
+            // Нужно подняться до уровня, с которого дотянемся до блоков нового слоя
+            // Целевая высота: блоки на newTargetY, нужно быть примерно на newTargetY - 1 или выше
+            double neededY = newTargetY - 2.0;
 
-            if (BlockUtils.place(currentTarget, item, rotate.get(), 50, true)) {
-                placedThisTick.add(currentTarget);
-                currentTarget = null; // Clear lock so we find a new one next tick
-                placements++;
+            if (playerY < neededY) {
+                doPillarUp(item);
                 timer = delay.get();
+                return;
             } else {
-                currentTarget = null;
-                break;
+                needsPillarUp = false;
             }
+        }
+
+        // Сортируем по расстоянию до игрока (ближайшие первыми)
+        Vec3d playerPos = mc.player.getPos();
+        layerQueue.sort(Comparator.comparingDouble(p -> playerPos.squaredDistanceTo(Vec3d.ofCenter(p))));
+
+        // Ставим блоки
+        int placed = 0;
+        for (BlockPos pos : layerQueue) {
+            if (placed >= blocksPerTick.get()) break;
+
+            double dist = Math.sqrt(mc.player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(pos)));
+            if (dist > PLACE_RANGE) {
+                // Слишком далеко — нужно pillar up чтобы подобраться
+                if (debug.get()) info("Block at %s is too far (%.1f), need to get closer", pos.toShortString(), dist);
+
+                // Попробовать подняться если блок выше
+                if (pos.getY() > mc.player.getY() + 2) {
+                    needsPillarUp = true;
+                }
+                continue;
+            }
+
+            if (!mc.world.getBlockState(pos).isReplaceable()) {
+                // Уже заполнен или нужно сломать
+                Block blockAt = mc.world.getBlockState(pos).getBlock();
+                if (!blocks.get().contains(blockAt)) {
+                    // Неправильный блок — сломать
+                    if (rotate.get()) {
+                        BlockPos finalPos = pos;
+                        Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), () -> {
+                            mc.interactionManager.attackBlock(finalPos, Direction.UP);
+                            mc.player.swingHand(Hand.MAIN_HAND);
+                        });
+                    } else {
+                        mc.interactionManager.attackBlock(pos, Direction.UP);
+                        mc.player.swingHand(Hand.MAIN_HAND);
+                    }
+                    timer = delay.get();
+                    return;
+                }
+                continue; // Блок правильный, пропускаем
+            }
+
+            // Ставим блок
+            if (BlockUtils.place(pos, item, rotate.get(), 50, true)) {
+                placed++;
+                if (debug.get()) info("Placed block at %s", pos.toShortString());
+            }
+        }
+
+        if (placed > 0) {
+            timer = delay.get();
+        }
+    }
+
+    // -------------------------
+    // Helpers
+    // -------------------------
+
+    /**
+     * Получить список незаполненных позиций blueprint на указанном Y-уровне
+     */
+    private List<BlockPos> getLayerQueue(int targetY) {
+        List<BlockPos> queue = new ArrayList<>();
+        for (BlockPos pos : blueprint) {
+            if (pos.getY() == targetY && mc.world.getBlockState(pos).isReplaceable()) {
+                queue.add(pos);
+            }
+        }
+        return queue;
+    }
+
+    /**
+     * Pillar up — прыжок и установка блока под ногами
+     */
+    private void doPillarUp(FindItemResult item) {
+        BlockPos below = mc.player.getBlockPos().down();
+
+        // Если под ногами воздух — ставим блок
+        if (mc.world.getBlockState(below).isReplaceable()) {
+            // Прыгаем
+            if (mc.player.isOnGround()) {
+                mc.player.jump();
+            }
+            return;
+        }
+
+        // Стоим на блоке — прыгаем и ставим блок под собой
+        if (mc.player.isOnGround()) {
+            mc.player.jump();
+        }
+
+        // Когда в воздухе — ставим блок прямо под ногами
+        BlockPos underFeet = mc.player.getBlockPos().down();
+        if (mc.world.getBlockState(underFeet).isReplaceable() && mc.player.getVelocity().y > 0) {
+            BlockUtils.place(underFeet, item, rotate.get(), 50, true);
+            if (debug.get()) info("Pillar up at %s", underFeet.toShortString());
         }
     }
 }

@@ -31,7 +31,6 @@ dependencies {
 
     // Meteor
     modImplementation(libs.meteor.client)
-    modImplementation(libs.baritone.api)
 }
 
 tasks {
